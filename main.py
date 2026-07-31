@@ -9,6 +9,17 @@ import numpy as np
 import config
 from tracker import HandPair, HandTracker
 
+# ── Color palette (BGR) ────────────────────────────────────────────────────
+_GLOW_DIM  = (155, 135,  90)   # outer halo
+_GLOW_MID  = (215, 205, 165)   # mid ring
+_RIM       = (248, 245, 238)   # bright rim core
+_INNER_RNG = (190, 186, 175)   # inner accent ring
+_SPOKE_FLL = (230, 226, 218)   # spoke fill
+_SPOKE_EDG = (248, 245, 238)   # spoke edge highlight
+_GOLD      = (  0, 165, 255)   # grip arcs + center dot  (RGB 255,165,0)
+_GOLD_GLOW = (  0,  80, 170)   # grip glow (darker gold)
+_HUB_FILL  = (210, 207, 200)   # hub background
+
 
 # ---------------------------------------------------------------------------
 # Geometry
@@ -24,54 +35,80 @@ def compute_angle(pair: HandPair) -> float:
 # Steering wheel renderer
 # ---------------------------------------------------------------------------
 
-def draw_steering_wheel(frame: np.ndarray, pair: HandPair, angle_deg: float) -> None:
+def _spoke(ov: np.ndarray, cx: int, cy: int, theta: float,
+           r0: int, r1: int) -> None:
+    """Filled tapered trapezoid spoke from radius r0 to r1 at angle theta."""
+    dx, dy   = math.cos(theta), math.sin(theta)
+    px, py   = -math.sin(theta), math.cos(theta)   # perpendicular
+    w0, w1   = 7, 3                                 # half-width hub / rim
+
+    pts = np.array([
+        [cx + r0*dx + w0*px,  cy + r0*dy + w0*py],
+        [cx + r0*dx - w0*px,  cy + r0*dy - w0*py],
+        [cx + r1*dx - w1*px,  cy + r1*dy - w1*py],
+        [cx + r1*dx + w1*px,  cy + r1*dy + w1*py],
+    ], dtype=np.int32)
+
+    cv2.fillPoly(ov, [pts], _SPOKE_FLL)
+    cv2.polylines(ov, [pts], True, _SPOKE_EDG, 1, cv2.LINE_AA)
+
+
+def draw_steering_wheel(frame: np.ndarray, pair: HandPair,
+                        angle_deg: float) -> None:
     h, w = frame.shape[:2]
 
-    lx = int(pair.left.x  * w)
-    ly = int(pair.left.y  * h)
-    rx = int(pair.right.x * w)
-    ry = int(pair.right.y * h)
+    lx = int(pair.left.x  * w);  ly = int(pair.left.y  * h)
+    rx = int(pair.right.x * w);  ry = int(pair.right.y * h)
 
     cx = (lx + rx) // 2
     cy = (ly + ry) // 2
-    r  = int(math.hypot(rx - lx, ry - ly) / 2)
+    r  = int(math.hypot(rx - lx, ry - ly) * 0.38)   # snug fit
 
-    if r < 40:          # hands too close — skip
+    if r < 36:
         return
 
-    a = math.radians(angle_deg)
+    a       = math.radians(angle_deg)
+    r_inner = int(r * 0.66)   # inner accent ring radius
+    r_hub   = 20              # hub circle radius
+
     ov = frame.copy()
 
-    # ── Rim  (thick dim glow → medium → thin bright core) ──────────────────
-    cv2.circle(ov, (cx, cy), r, (0,  90, 130), 18, cv2.LINE_AA)
-    cv2.circle(ov, (cx, cy), r, (0, 185, 220),  7, cv2.LINE_AA)
-    cv2.circle(ov, (cx, cy), r, (0, 245, 255),  2, cv2.LINE_AA)
+    # ── Rim glow (three concentric draws on same radius → layered halo) ────
+    cv2.circle(ov, (cx, cy), r, _GLOW_DIM, 18, cv2.LINE_AA)
+    cv2.circle(ov, (cx, cy), r, _GLOW_MID,  7, cv2.LINE_AA)
+    cv2.circle(ov, (cx, cy), r, _RIM,        2, cv2.LINE_AA)
 
-    # ── Spokes (120° apart, rotated by steering angle) ─────────────────────
+    # ── Inner accent ring ──────────────────────────────────────────────────
+    cv2.circle(ov, (cx, cy), r_inner, _INNER_RNG, 1, cv2.LINE_AA)
+
+    # ── Three tapered spokes ───────────────────────────────────────────────
     for i in range(3):
-        theta = math.radians(i * 120) + a
-        ex = int(cx + r * math.cos(theta))
-        ey = int(cy + r * math.sin(theta))
-        cv2.line(ov, (cx, cy), (ex, ey), (0,  90, 130), 7, cv2.LINE_AA)
-        cv2.line(ov, (cx, cy), (ex, ey), (0, 220, 255), 2, cv2.LINE_AA)
+        _spoke(ov, cx, cy, math.radians(i * 120) + a, r_hub + 2, r - 5)
 
-    # ── Hub ─────────────────────────────────────────────────────────────────
-    cv2.circle(ov, (cx, cy), 18, (0,  90, 130), 16, cv2.LINE_AA)
-    cv2.circle(ov, (cx, cy), 18, (0, 220, 255),  3, cv2.LINE_AA)
-    cv2.circle(ov, (cx, cy),  5, (0, 245, 255), -1)
+    # ── Hub ────────────────────────────────────────────────────────────────
+    cv2.circle(ov, (cx, cy), r_hub, _HUB_FILL, -1)
+    cv2.circle(ov, (cx, cy), r_hub, _INNER_RNG, 1, cv2.LINE_AA)
+    cv2.circle(ov, (cx, cy), 5, _GOLD, -1)              # gold center pip
 
-    # ── Grip highlights — bright arcs where hands hold the rim ─────────────
+    # ── 12-o'clock indicator (rotates with wheel) ─────────────────────────
+    top_x = int(cx + (r - 10) * math.cos(a - math.pi / 2))
+    top_y = int(cy + (r - 10) * math.sin(a - math.pi / 2))
+    cv2.circle(ov, (top_x, top_y), 5, _GOLD, -1)
+
+    # ── Grip arcs — gold glow then bright core ────────────────────────────
     for offset in (0.0, math.pi):
         gd = math.degrees(a + offset)
         cv2.ellipse(ov, (cx, cy), (r, r), 0,
-                    gd - 24, gd + 24, (0, 255, 190), 6, cv2.LINE_AA)
+                    gd - 26, gd + 26, _GOLD_GLOW, 9, cv2.LINE_AA)
+        cv2.ellipse(ov, (cx, cy), (r, r), 0,
+                    gd - 26, gd + 26, _GOLD,      4, cv2.LINE_AA)
 
-    # ── Wrist tracking dots ─────────────────────────────────────────────────
+    # ── Wrist tracking dots ────────────────────────────────────────────────
     for px, py in ((lx, ly), (rx, ry)):
-        cv2.circle(ov, (px, py), 10, (0,  90, 130), -1)
-        cv2.circle(ov, (px, py),  7, (0, 255, 190), -1)
+        cv2.circle(ov, (px, py),  9, _GOLD_GLOW, -1)
+        cv2.circle(ov, (px, py),  5, _GOLD,       -1)
 
-    frame[:] = cv2.addWeighted(ov, 0.78, frame, 0.22, 0)
+    frame[:] = cv2.addWeighted(ov, 0.80, frame, 0.20, 0)
 
 
 # ---------------------------------------------------------------------------
