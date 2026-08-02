@@ -28,14 +28,30 @@ _CYAN       = (255, 210,   0)   # title accent
 
 
 # ---------------------------------------------------------------------------
-# Steering wheel
+# Steering wheel — geometry helpers
 # ---------------------------------------------------------------------------
+
+_CUT_HALF = 0.58   # radians each side of the flat bottom (~33°)
+
+def _dcut_pts(cx: int, cy: int, r: int, a: float, n: int = 90) -> np.ndarray:
+    """Polygon points for a D-cut circle. Flat section at 6-o'clock of wheel."""
+    bottom    = a + math.pi / 2          # screen angle of wheel's 6-o'clock
+    arc_start = bottom + _CUT_HALF       # right edge of flat gap
+    arc_span  = 2 * math.pi - 2 * _CUT_HALF   # long arc (the D shape)
+    pts = [
+        (cx + r * math.cos(arc_start + arc_span * i / n),
+         cy + r * math.sin(arc_start + arc_span * i / n))
+        for i in range(n + 1)
+    ]
+    return np.array(pts, dtype=np.int32).reshape((-1, 1, 2))
+
 
 def _spoke(ov: np.ndarray, cx: int, cy: int, theta: float,
            r0: int, r1: int) -> None:
+    """Wide tapered spoke with a structural cross-bar."""
     dx, dy = math.cos(theta), math.sin(theta)
     px, py = -math.sin(theta), math.cos(theta)
-    w0, w1 = 7, 3
+    w0, w1 = 11, 5   # half-width at hub / rim end
 
     pts = np.array([
         [cx + r0*dx + w0*px,  cy + r0*dy + w0*py],
@@ -43,10 +59,33 @@ def _spoke(ov: np.ndarray, cx: int, cy: int, theta: float,
         [cx + r1*dx - w1*px,  cy + r1*dy - w1*py],
         [cx + r1*dx + w1*px,  cy + r1*dy + w1*py],
     ], dtype=np.int32)
-
     cv2.fillPoly(ov, [pts], _SPOKE_FLL)
     cv2.polylines(ov, [pts], True, _SPOKE_EDG, 1, cv2.LINE_AA)
 
+    # Cross-bar at 55 % of spoke length
+    t   = 0.55
+    crx = cx + (r0 + t * (r1 - r0)) * dx
+    cry = cy + (r0 + t * (r1 - r0)) * dy
+    chw = int(w0 + t * (w1 - w0)) + 7   # slightly wider than the spoke there
+    cv2.line(ov,
+             (int(crx + chw * px), int(cry + chw * py)),
+             (int(crx - chw * px), int(cry - chw * py)),
+             _SPOKE_EDG, 2, cv2.LINE_AA)
+
+
+def _hub_pts(cx: int, cy: int, r_hub: int, a: float, n: int = 8) -> np.ndarray:
+    """Octagonal hub polygon."""
+    pts = [
+        (int(cx + r_hub * math.cos(a + math.radians(i * 360 / n + 22.5))),
+         int(cy + r_hub * math.sin(a + math.radians(i * 360 / n + 22.5))))
+        for i in range(n)
+    ]
+    return np.array(pts, dtype=np.int32)
+
+
+# ---------------------------------------------------------------------------
+# Steering wheel — main draw call
+# ---------------------------------------------------------------------------
 
 def draw_steering_wheel(frame: np.ndarray, pair: HandPair,
                         state: ControlState) -> None:
@@ -62,57 +101,59 @@ def draw_steering_wheel(frame: np.ndarray, pair: HandPair,
     if r < 36:
         return
 
-    a       = math.radians(state.angle)
-    r_inner = int(r * 0.66)
-    r_hub   = 20
+    a     = math.radians(state.angle)
+    r_hub = 24
 
     ov = frame.copy()
 
-    # Rim glow
-    cv2.circle(ov, (cx, cy), r, _GLOW_DIM, 18, cv2.LINE_AA)
-    cv2.circle(ov, (cx, cy), r, _GLOW_MID,  7, cv2.LINE_AA)
-    cv2.circle(ov, (cx, cy), r, _RIM,        2, cv2.LINE_AA)
+    # ── D-cut rim — three-layer glow ───────────────────────────────────────
+    rim = _dcut_pts(cx, cy, r, a)
+    cv2.polylines(ov, [rim], True, _GLOW_DIM, 20, cv2.LINE_AA)
+    cv2.polylines(ov, [rim], True, _GLOW_MID,  8, cv2.LINE_AA)
+    cv2.polylines(ov, [rim], True, _RIM,        2, cv2.LINE_AA)
 
-    # Inner accent ring
-    cv2.circle(ov, (cx, cy), r_inner, _INNER_RNG, 1, cv2.LINE_AA)
+    # Inner grip channel (D-cut at r-9, thin accent line)
+    inner = _dcut_pts(cx, cy, r - 9, a)
+    cv2.polylines(ov, [inner], True, _INNER_RNG, 1, cv2.LINE_AA)
 
-    # Tapered spokes
-    for i in range(3):
-        _spoke(ov, cx, cy, math.radians(i * 120) + a, r_hub + 2, r - 5)
+    # ── Three spokes at 12 / 4 / 8 o'clock ────────────────────────────────
+    # (-π/2 = 12 o'clock; ±2π/3 puts the other two at 4 and 8 o'clock)
+    for offset in (-math.pi / 2,
+                   -math.pi / 2 + 2 * math.pi / 3,
+                   -math.pi / 2 - 2 * math.pi / 3):
+        _spoke(ov, cx, cy, a + offset, r_hub + 2, r - 8)
 
-    # Hub
-    cv2.circle(ov, (cx, cy), r_hub, _HUB_FILL, -1)
-    cv2.circle(ov, (cx, cy), r_hub, _INNER_RNG, 1, cv2.LINE_AA)
+    # ── Octagonal hub ──────────────────────────────────────────────────────
+    hub = _hub_pts(cx, cy, r_hub, a)
+    cv2.fillPoly(ov, [hub], _HUB_FILL)
+    cv2.polylines(ov, [hub], True, _INNER_RNG, 1, cv2.LINE_AA)
 
-    # Hub pip — color reflects pedal state
-    if state.pedal == 'ACCEL':
-        pip_color = _GREEN
-    elif state.pedal == 'BRAKE':
-        pip_color = _RED
-    else:
-        pip_color = _GOLD
-    cv2.circle(ov, (cx, cy), 5, pip_color, -1)
+    # Small recessed ring inside hub
+    cv2.circle(ov, (cx, cy), r_hub - 7, _INNER_RNG, 1, cv2.LINE_AA)
 
-    # 12-o'clock indicator
-    top_x = int(cx + (r - 10) * math.cos(a - math.pi / 2))
-    top_y = int(cy + (r - 10) * math.sin(a - math.pi / 2))
-    cv2.circle(ov, (top_x, top_y), 5, _GOLD, -1)
+    # Hub pip — colour signals pedal state
+    pip = _GREEN if state.pedal == 'ACCEL' else \
+          _RED   if state.pedal == 'BRAKE' else _GOLD
+    cv2.circle(ov, (cx, cy), 6, pip, -1)
 
-    # Grip arcs — active side brightens when steering
+    # ── 12-o'clock stripe on inner channel ────────────────────────────────
+    top_ang = a - math.pi / 2
+    for rr, rc, rt in ((r - 1, _GOLD_GLOW, 6), (r - 1, _GOLD, 3)):
+        tx = int(cx + rr * math.cos(top_ang))
+        ty = int(cy + rr * math.sin(top_ang))
+        cv2.circle(ov, (tx, ty), rt, rc, -1)
+
+    # ── Grip arcs at 3 and 9 o'clock ──────────────────────────────────────
     for side, offset in (('right', 0.0), ('left', math.pi)):
-        if (side == 'right' and state.steer == 'RIGHT') or \
-           (side == 'left'  and state.steer == 'LEFT'):
-            glow_c, arc_c = _GOLD_GLOW, _GRIP_ACT
-        else:
-            glow_c, arc_c = _GOLD_GLOW, _GOLD
-
+        active = (side == 'right' and state.steer == 'RIGHT') or \
+                 (side == 'left'  and state.steer == 'LEFT')
         gd = math.degrees(a + offset)
-        cv2.ellipse(ov, (cx, cy), (r, r), 0, gd - 26, gd + 26,
-                    glow_c, 9, cv2.LINE_AA)
-        cv2.ellipse(ov, (cx, cy), (r, r), 0, gd - 26, gd + 26,
-                    arc_c,  4, cv2.LINE_AA)
+        cv2.ellipse(ov, (cx, cy), (r, r), 0, gd - 28, gd + 28,
+                    _GOLD_GLOW, 10, cv2.LINE_AA)
+        cv2.ellipse(ov, (cx, cy), (r, r), 0, gd - 28, gd + 28,
+                    _GRIP_ACT if active else _GOLD, 4, cv2.LINE_AA)
 
-    # Wrist dots
+    # ── Wrist tracking dots ────────────────────────────────────────────────
     for px, py in ((lx, ly), (rx, ry)):
         cv2.circle(ov, (px, py),  9, _GOLD_GLOW, -1)
         cv2.circle(ov, (px, py),  5, _GOLD,       -1)
