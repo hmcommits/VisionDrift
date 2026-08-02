@@ -16,6 +16,5 @@ CAMERA_INDEX  = 0
 FRAME_WIDTH   = 1280
 FRAME_HEIGHT  = 720
 
-# --- HUD ---
-WHEEL_RADIUS   = 95    # px — outer rim radius
-WHEEL_OFFSET_Y = 140   # px from bottom edge to wheel center
+# --- Robustness ---
+HANDS_LOST_TIMEOUT = 8   # frames before keys are released when hands leave frame
